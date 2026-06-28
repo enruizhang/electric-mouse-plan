@@ -1,4 +1,4 @@
-const CACHE_NAME = "electric-mouse-plan-pwa-v1.4.0";
+const CACHE_NAME = "electric-mouse-plan-pwa-v1.4.1";
 const CORE_ASSETS = [
   "./",
   "./index.html",

@@ -590,28 +590,40 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
   }
   .panel h2, .stat-card h3 { font-size: 16px; line-height: 1.15; }
   .panel > .row[style*="space-between"] {
+    flex-direction: column;
     flex-wrap: nowrap;
-    align-items: center;
+    align-items: stretch;
     gap: 6px;
+    width: 100%;
+    max-width: 100%;
+    overflow: hidden;
   }
-  .panel > .row[style*="space-between"] > div:first-child {
+  .panel > .row[style*="space-between"] > :first-child {
     min-width: 0;
+    width: 100%;
+    max-width: 100%;
     flex: 0 1 auto;
   }
   .panel > .row[style*="space-between"] > .row {
-    flex: 1 1 auto;
-    flex-wrap: nowrap;
-    justify-content: flex-end;
+    width: 100%;
+    max-width: 100%;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    justify-content: flex-start;
     gap: 4px;
     min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: none;
+    overflow: visible;
   }
-  .panel > .row[style*="space-between"] > .row::-webkit-scrollbar { display: none; }
   .panel > .row[style*="space-between"] > .row button {
-    flex: 0 0 auto;
-    white-space: nowrap;
+    flex: 0 1 auto;
+    max-width: 100%;
+    white-space: normal;
     padding-inline: 6px;
+  }
+  .panel > .row[style*="space-between"] > button {
+    align-self: flex-start;
+    max-width: 100%;
+    white-space: normal;
   }
   .panel > .row[style*="space-between"] .hint {
     margin: 2px 0 0;
