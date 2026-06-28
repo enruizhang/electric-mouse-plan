@@ -445,15 +445,16 @@
     return customMouseImage?.dataUrl || "electric-mouse.png";
   }
 
-  function renderShell(inner) {
+  function renderShell(inner, options = {}) {
+    const showIntro = !!options.showIntro;
     app.innerHTML = `
       <header class="topbar">
-        <div class="title-wrap">
+        ${showIntro ? `<div class="title-wrap">
           <h1>${esc(settings.title)}</h1>
           <p class="subtitle">${esc(settings.subtitle)}</p>
           <p class="quote">“${esc(settings.quote)}” — ${esc(settings.quoteAuthor)}</p>
           <p class="current-date">当前日期：${esc(state.activeDay)}（每天 12:00 切换）</p>
-        </div>
+        </div>` : `<div></div>`}
         <nav class="toolbar">
           <button class="ghost" data-action="home">首页</button>
           <button class="ghost" data-action="compare">对比</button>
@@ -494,23 +495,22 @@
       <main class="note-board module-board" data-board="modules">
         ${state.modules.map((module, index) => moduleCard(module, index)).join("")}
       </main>
-    `);
+    `, { showIntro: true });
   }
 
   function moduleCard(module, index) {
     const done = activeHistory().filter((item) => item.moduleId === module.id).reduce((sum, item) => sum + Number(item.amount || 1), 0);
-    const pos = module.position || defaultModulePosition(index);
+    const pos = clampSavedNotePosition(module.position || defaultModulePosition(index), "module");
+    module.position = pos;
     return `
       <article class="module-card sticky-note" style="left:${pos.x}px;top:${pos.y}px;--note-color:${module.color};color:${module.textColor};opacity:${module.alpha ?? .92};--rot:${((index % 5) - 2) * 1.2}deg" data-action="open-module" data-id="${module.id}">
-        <button class="drag-handle" data-drag="module" data-id="${module.id}" title="拖动">↕</button>
+        <button class="drag-handle" data-drag="module" data-id="${module.id}" title="拖动">拖</button>
         <div>
           <h2>${esc(module.name)}</h2>
           <p class="module-meta">${module.tasks.length} 个事项 · 已完成 ${done} 次</p>
         </div>
         <div class="card-actions">
           <button class="small" data-action="edit-module" data-id="${module.id}">编辑</button>
-          <button class="small icon" data-action="move-module" data-id="${module.id}" data-dir="-1" ${index === 0 ? "disabled" : ""}>↑</button>
-          <button class="small icon" data-action="move-module" data-id="${module.id}" data-dir="1" ${index === state.modules.length - 1 ? "disabled" : ""}>↓</button>
           ${module.locked ? "" : `<button class="small danger" data-action="delete-module" data-id="${module.id}">删除</button>`}
         </div>
       </article>`;
@@ -536,10 +536,10 @@
           </div>
         </div>
       </section>
-      <section class="panel">
-        <h2>新增便签</h2>
+      <details class="panel collapsible-form">
+        <summary>新增便签</summary>
         ${taskForm(module.id)}
-      </section>
+      </details>
       ${isPeriod ? renderTaskBoard(module, sortByTime(visiblePeriodTasks(module.tasks))) : renderTaskBoard(module, sortByTime(module.tasks))}
       ${hasCalendar ? renderCalendar(module.id) : ""}
     `);
@@ -589,12 +589,13 @@
 
   function taskCard(module, task, index, sourceDate = "") {
     const total = activeHistory().filter((item) => item.taskId === task.id).reduce((sum, item) => sum + Number(item.amount || 1), 0);
-    const pos = task.position || defaultTaskPosition(index);
+    const pos = clampSavedNotePosition(task.position || defaultTaskPosition(index), "task");
+    task.position = pos;
     const countLike = task.type === "count" || task.isCount;
     const doneClass = task.done ? " done" : "";
     return `
       <article class="task-card sticky-note${doneClass}" style="left:${pos.x}px;top:${pos.y}px;--note-color:${task.color};color:${task.textColor};opacity:${task.alpha ?? .92}" data-task-id="${task.id}">
-        <button class="drag-handle" data-drag="task" data-module="${module.id}" data-task="${task.id}" data-source-date="${sourceDate}" title="拖动">↕</button>
+        <button class="drag-handle" data-drag="task" data-module="${module.id}" data-task="${task.id}" data-source-date="${sourceDate}" title="拖动">拖</button>
         <div class="task-title">${esc(task.title)}</div>
         <div class="module-meta">${esc(typeLabel(task, module.id))} · 已记录 ${total} 次</div>
         ${task.time ? `<div class="badge-line">时间：${esc(task.time)}</div>` : ""}
@@ -612,7 +613,7 @@
         <div class="task-actions">
           <button class="primary complete-button" data-action="complete-task" data-module="${module.id}" data-task="${task.id}" data-source-date="${sourceDate}">${task.done ? "已完成" : "完成"}</button>
           <button class="small" data-action="edit-task" data-module="${module.id}" data-task="${task.id}" data-source-date="${sourceDate}">编辑</button>
-          ${sourceDate ? "" : `<button class="small icon" data-action="move-task" data-module="${module.id}" data-task="${task.id}" data-dir="-1">↑</button><button class="small icon" data-action="move-task" data-module="${module.id}" data-task="${task.id}" data-dir="1">↓</button><button class="small danger" data-action="delete-task" data-module="${module.id}" data-task="${task.id}">删除</button>`}
+          ${sourceDate ? "" : `<button class="small danger" data-action="delete-task" data-module="${module.id}" data-task="${task.id}">删除</button>`}
         </div>
       </article>`;
   }
@@ -659,7 +660,8 @@
           <button data-action="open-module" data-id="${module.id}">返回模块</button>
         </div>
       </section>
-      <section class="panel">
+      <details class="panel collapsible-form">
+        <summary>添加备用便签</summary>
         <form class="form-grid" data-form="maybe" data-module="${module.id}">
           <label>事项<input name="title" required placeholder="先放在这里"></label>
           <label>备注<input name="note" placeholder="可选备注"></label>
@@ -668,7 +670,7 @@
           <label>透明度<input name="alpha" type="range" min="35" max="100" value="92"></label>
           <button class="primary" type="submit">添加备用便签</button>
         </form>
-      </section>
+      </details>
       <section class="note-board task-board maybe-board">
         ${module.maybe.length ? module.maybe.map((item, index) => maybeCard(module, item, index)).join("") : `<div class="panel empty">备用池还是空的。</div>`}
       </section>
@@ -676,10 +678,11 @@
   }
 
   function maybeCard(module, item, index) {
-    const pos = item.position || defaultTaskPosition(index);
+    const pos = clampSavedNotePosition(item.position || defaultTaskPosition(index), "task");
+    item.position = pos;
     return `
       <article class="task-card sticky-note" style="left:${pos.x}px;top:${pos.y}px;--note-color:${item.color};color:${item.textColor};opacity:${item.alpha ?? .92}">
-        <button class="drag-handle" data-drag="maybe" data-module="${module.id}" data-id="${item.id}" title="拖动">↕</button>
+        <button class="drag-handle" data-drag="maybe" data-module="${module.id}" data-id="${item.id}" title="拖动">拖</button>
         <div class="task-title">${esc(item.title)}</div>
         ${item.note ? `<div class="badge-line">备注：${esc(item.note)}</div>` : ""}
         <div class="card-actions">
@@ -937,11 +940,27 @@
   }
 
   function defaultModulePosition(index) {
+    if (isCompactViewport()) return { x: 8 + (index % 2) * 132, y: 10 + Math.floor(index / 2) * 122 };
     return { x: 18 + (index % 3) * 255, y: 18 + Math.floor(index / 3) * 190 };
   }
 
   function defaultTaskPosition(index) {
+    if (isCompactViewport()) return { x: 8 + (index % 2) * 132, y: 10 + Math.floor(index / 2) * 136 };
     return { x: 14 + (index % 3) * 250, y: 14 + Math.floor(index / 3) * 198 };
+  }
+
+  function isCompactViewport() {
+    return typeof window !== "undefined" && window.innerWidth <= 720;
+  }
+
+  function clampSavedNotePosition(pos, kind) {
+    if (typeof window === "undefined") return pos;
+    const width = isCompactViewport() ? (kind === "module" ? 124 : 126) : 236;
+    const maxX = Math.max(0, window.innerWidth - width - 24);
+    return {
+      x: Math.max(0, Math.min(Number(pos.x) || 0, maxX)),
+      y: Math.max(0, Number(pos.y) || 0)
+    };
   }
 
   function clampViewportPosition(pos, width, height) {
