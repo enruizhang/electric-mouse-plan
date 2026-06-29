@@ -46,12 +46,14 @@
   let drag = null;
   let suppressClickUntil = 0;
   let lastCompleteToggle = { key: "", time: 0 };
+  let lastMouseId = "";
 
   const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
   const nowIso = () => new Date().toISOString();
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[m]));
   const clone = (value) => JSON.parse(JSON.stringify(value));
   const normalize = (value) => String(value || "").trim().normalize("NFKC").toLowerCase();
+  const cssEscape = (value) => (window.CSS?.escape ? CSS.escape(String(value)) : String(value).replace(/"/g, '\\"'));
   const formatTime = (iso) => new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const todayRealKey = () => dateKey(new Date());
 
@@ -98,6 +100,7 @@
       dailyArchives: {},
       futureTasks: [],
       mousePos: { x: 18, y: 160 },
+      mice: [],
       collapsedPeriods: {},
       calendar: {},
       modules: [
@@ -130,6 +133,48 @@
     };
   }
 
+  function defaultMousePosition(index = 0) {
+    if (typeof window === "undefined") return { x: 18 + index * 72, y: 160 + index * 48 };
+    const compact = window.innerWidth <= 720;
+    const w = Math.max(1, window.innerWidth);
+    const h = Math.max(1, window.innerHeight);
+    const spots = compact
+      ? [
+        { x: w - 86, y: h - 132 },
+        { x: 12, y: h - 132 },
+        { x: w - 86, y: Math.max(80, h - 260) },
+        { x: 12, y: Math.max(80, h - 260) }
+      ]
+      : [
+        { x: 18, y: 160 },
+        { x: 126, y: 160 },
+        { x: 18, y: 292 },
+        { x: 126, y: 292 }
+      ];
+    return spots[index % spots.length];
+  }
+
+  function normalizeSpeechSet(value = {}) {
+    const merged = Object.assign(clone(DEFAULT_SPEECH), value || {});
+    Object.keys(DEFAULT_SPEECH).forEach((kind) => {
+      merged[kind] = Array.isArray(merged[kind]) ? merged[kind].filter(Boolean) : clone(DEFAULT_SPEECH[kind]);
+    });
+    return merged;
+  }
+
+  function defaultMouse(index = 0, overrides = {}) {
+    return {
+      id: overrides.id || uid(),
+      name: overrides.name || `电鼠 ${index + 1}`,
+      image: overrides.image || "",
+      position: overrides.position || defaultMousePosition(index),
+      speech: normalizeSpeechSet(overrides.speech),
+      speechBubbleSide: overrides.speechBubbleSide === "left" ? "left" : "right",
+      visible: overrides.visible !== false,
+      createdAt: overrides.createdAt || nowIso()
+    };
+  }
+
   let state = loadJson(KEYS.state, null) || defaultState();
   let history = loadJson(KEYS.history, []);
   let settings = Object.assign(defaultSettings(), loadJson(KEYS.settings, {}));
@@ -151,6 +196,27 @@
     state.collapsedPeriods = state.collapsedPeriods || {};
     state.calendar = state.calendar || {};
     state.mousePos = state.mousePos || { x: 18, y: 160 };
+    state.mice = Array.isArray(state.mice) ? state.mice : [];
+    if (!state.mice.length) {
+      state.mice = [defaultMouse(0, {
+        id: "mouse-1",
+        name: settings.mouseName || "电鼠 1",
+        image: customMouseImage?.dataUrl || "",
+        position: state.mousePos,
+        speech
+      })];
+    }
+    state.mice = state.mice.map((mouse, index) => defaultMouse(index, {
+      id: mouse.id,
+      name: String(mouse.name || "").trim() || `电鼠 ${index + 1}`,
+      image: typeof mouse.image === "string" ? mouse.image : (mouse.image?.dataUrl || mouse.dataUrl || ""),
+      position: mouse.position || (index === 0 ? state.mousePos : defaultMousePosition(index)),
+      speech: mouse.speech || (index === 0 ? speech : DEFAULT_SPEECH),
+      speechBubbleSide: mouse.speechBubbleSide === "left" ? "left" : "right",
+      visible: mouse.visible,
+      createdAt: mouse.createdAt
+    }));
+    state.mousePos = state.mice[0]?.position || state.mousePos;
     state.activeDay = state.activeDay || actionDayKey();
 
     if (!getModule("today")) state.modules.unshift(defaultModule("today", "只有今日做的事", true, "#ffffff", "#2e2a24"));
@@ -188,7 +254,7 @@
       item.historyDate = item.historyDate || item.time?.slice(0, 10) || "";
     });
 
-    settings.mouseName = settings.mouseName || "电鼠";
+    settings.mouseName = state.mice[0]?.name || settings.mouseName || "电鼠";
   }
 
   function migrateDefaultModuleColor(module) {
@@ -262,6 +328,13 @@
   }
 
   function persist() {
+    const primaryMouse = state.mice?.[0];
+    if (primaryMouse) {
+      settings.mouseName = primaryMouse.name || "电鼠 1";
+      speech = normalizeSpeechSet(primaryMouse.speech);
+      customMouseImage = primaryMouse.image ? { dataUrl: primaryMouse.image } : null;
+      state.mousePos = primaryMouse.position || state.mousePos;
+    }
     saveJson(KEYS.state, state);
     saveJson(KEYS.history, history);
     saveJson(KEYS.settings, settings);
@@ -423,6 +496,29 @@
     return tasks.filter((task) => !task.datePoint || task.datePoint <= date);
   }
 
+  function isTaskDueToday(task, moduleId, date = todayRealKey()) {
+    if (!task) return false;
+    if (moduleId === "today") return task.type !== "non_today";
+    if (moduleId === "important") return task.displayDate === date;
+    if (moduleId === "period") {
+      if (task.datePoint) return task.datePoint === date;
+      if (task.deadline) return task.deadline <= date;
+      return task.period === "daily";
+    }
+    return false;
+  }
+
+  function getTodayTasksFromModule(moduleId, date = todayRealKey()) {
+    const module = getModule(moduleId);
+    if (!module) return [];
+    const tasks = moduleId === "today" ? module.tasks : module.tasks.filter((task) => isTaskDueToday(task, moduleId, date));
+    return sortByTime(tasks).map((task) => ({ module, task, sourceDate: "", sourceName: module.name }));
+  }
+
+  function getTodayOverviewTasks(date = todayRealKey()) {
+    return ["today", "period", "important"].flatMap((id) => getTodayTasksFromModule(id, date));
+  }
+
   function applyBackground() {
     document.documentElement.style.setProperty("--module-alpha", String(settings.moduleAlpha / 100));
     document.documentElement.style.setProperty("--task-alpha", String(settings.taskAlpha / 100));
@@ -441,8 +537,43 @@
     style.textContent = `#backgroundLayer::after{background:rgba(255,250,240,${settings.overlay / 100});backdrop-filter:blur(${settings.blur}px);}`;
   }
 
-  function mouseImageSrc() {
-    return customMouseImage?.dataUrl || "electric-mouse.png";
+  function mouseImageSrc(mouse) {
+    return mouse?.image || "electric-mouse.png";
+  }
+
+  function effectiveBubbleSide(mouse, pos) {
+    const preferred = mouse?.speechBubbleSide === "left" ? "left" : "right";
+    if (typeof window === "undefined") return preferred;
+    const bubbleWidth = window.innerWidth <= 720 ? 190 : 220;
+    const mouseWidth = window.innerWidth <= 720 ? 76 : 92;
+    const gap = window.innerWidth <= 720 ? 52 : 70;
+    if (preferred === "right" && pos.x + gap + bubbleWidth > window.innerWidth - 8) return "left";
+    if (preferred === "left" && pos.x + mouseWidth - gap - bubbleWidth < 8) return "right";
+    return preferred;
+  }
+
+  function applyBubbleSide(target, mouse, pos) {
+    const bubble = target?.querySelector?.(".mouse-bubble");
+    if (!bubble || !mouse) return;
+    const side = effectiveBubbleSide(mouse, pos);
+    bubble.classList.toggle("side-left", side === "left");
+    bubble.classList.toggle("side-right", side === "right");
+  }
+
+  function renderMice() {
+    return (state.mice || []).filter((mouse) => mouse.visible !== false).map((mouse, index) => {
+      const pos = clampViewportPosition(mouse.position || defaultMousePosition(index), 92, 92);
+      mouse.position = pos;
+      const text = (mouse.speech?.random || DEFAULT_SPEECH.random)[0] || "吱。";
+      const side = effectiveBubbleSide(mouse, pos);
+      return `
+        <div class="mouse-float" style="left:${pos.x}px;top:${pos.y}px;z-index:${30 + index}" data-mouse-wrap data-mouse-id="${esc(mouse.id)}">
+          <div class="mouse-bubble side-${side}" data-mouse-bubble="${esc(mouse.id)}">${esc(text)}</div>
+          <button class="electric-mouse" title="点击${esc(mouse.name)}" data-action="mouse" data-id="${esc(mouse.id)}" data-drag="mouse">
+            <img src="${esc(mouseImageSrc(mouse))}" alt="${esc(mouse.name)}">
+          </button>
+        </div>`;
+    }).join("");
   }
 
   function renderShell(inner, options = {}) {
@@ -462,12 +593,7 @@
         </nav>
       </header>
       ${inner}
-      <div class="mouse-float" style="left:${state.mousePos.x}px;top:${state.mousePos.y}px" data-mouse-wrap>
-        <div class="mouse-bubble" data-mouse-bubble>${esc((speech.random || DEFAULT_SPEECH.random)[0])}</div>
-        <button class="electric-mouse" title="点击${esc(settings.mouseName)}" data-action="mouse" data-drag="mouse">
-          <img src="${esc(mouseImageSrc())}" alt="${esc(settings.mouseName)}">
-        </button>
-      </div>
+      ${renderMice()}
     `;
   }
 
@@ -522,7 +648,7 @@
     const isToday = module.id === "today";
     const isPeriod = module.id === "period";
     const hasCalendar = isToday || isPeriod || module.id === "important";
-    renderShell(`
+    const content = `
       <section class="panel">
         <div class="row" style="justify-content:space-between">
           <div>
@@ -530,6 +656,7 @@
             <p class="hint">${isToday ? "今日任务每天 12:00 归档清空；非今日事项会在到期后自动出现。" : isPeriod ? "这里的每一张便签默认都是周期任务。" : "添加、完成、计数或整理这个模块里的行动。"}</p>
           </div>
           <div class="row">
+            ${isToday ? `<button data-action="today-overview-toggle">今日总览</button>` : ""}
             ${(isToday || isPeriod) ? `<button data-action="maybe" data-id="${module.id}">也许自己可以做的事</button>` : ""}
             ${hasCalendar ? `<button data-action="day" data-module="${module.id}" data-date="${todayRealKey()}">日期记录</button>` : ""}
             <button data-action="stats" data-id="${module.id}">看已做统计</button>
@@ -542,7 +669,35 @@
       </details>
       ${isPeriod ? renderTaskBoard(module, sortByTime(visiblePeriodTasks(module.tasks))) : renderTaskBoard(module, sortByTime(module.tasks))}
       ${hasCalendar ? renderCalendar(module.id) : ""}
-    `);
+    `;
+    const page = isToday && route.todayPanel
+      ? `<div class="today-overview-layout"><div class="today-main">${content}</div>${renderTodayExtension(route.todayPanelTab || "period")}</div>`
+      : content;
+    renderShell(page);
+  }
+
+  function renderTodayExtension(tab = "period") {
+    const moduleId = tab === "important" ? "important" : "period";
+    const rows = getTodayTasksFromModule(moduleId);
+    const title = moduleId === "period" ? "周期计划" : "重要的事";
+    return `
+      <aside class="today-extension panel">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <h2>今日总览</h2>
+            <p class="hint">在当前页查看，不跳转。</p>
+          </div>
+          <button class="small" data-action="today-overview-close">收起</button>
+        </div>
+        <div class="row overview-tabs">
+          <button class="${moduleId === "period" ? "primary" : "ghost"}" data-action="today-overview-tab" data-tab="period">周期计划</button>
+          <button class="${moduleId === "important" ? "primary" : "ghost"}" data-action="today-overview-tab" data-tab="important">重要的事</button>
+        </div>
+        <h3>${esc(title)} · 今天</h3>
+        <section class="overview-notes side-overview-notes">
+          ${rows.length ? rows.map((row, index) => overviewTaskCard(row, index)).join("") : `<p class="empty">今天这里暂时没有要做的事。</p>`}
+        </section>
+      </aside>`;
   }
 
   function taskForm(moduleId) {
@@ -614,6 +769,32 @@
           <button class="primary complete-button" data-action="complete-task" data-module="${module.id}" data-task="${task.id}" data-source-date="${sourceDate}">${task.done ? "已完成" : "完成"}</button>
           <button class="small" data-action="edit-task" data-module="${module.id}" data-task="${task.id}" data-source-date="${sourceDate}">编辑</button>
           ${sourceDate ? "" : `<button class="small danger" data-action="delete-task" data-module="${module.id}" data-task="${task.id}">删除</button>`}
+        </div>
+      </article>`;
+  }
+
+  function overviewTaskCard(item, index) {
+    const { module, task, sourceDate = "" } = item;
+    const total = activeHistory().filter((entry) => entry.taskId === task.id).reduce((sum, entry) => sum + Number(entry.amount || 1), 0);
+    const countLike = task.type === "count" || task.isCount;
+    const doneClass = task.done ? " done" : "";
+    return `
+      <article class="overview-note task-card sticky-note${doneClass}" style="--note-color:${task.color || "#ffffff"};color:${task.textColor || "#2e2a24"};opacity:${task.alpha ?? .92};--rot:${((index % 5) - 2) * .7}deg" data-task-id="${task.id}">
+        <div class="task-title">${esc(task.title)}</div>
+        <div class="module-meta">来源：${esc(module.name)} · 已记录 ${total} 次</div>
+        ${task.time ? `<div class="badge-line">时间：${esc(task.time)}</div>` : ""}
+        ${task.note ? `<div class="badge-line">备注：${esc(task.note)}</div>` : ""}
+        ${task.displayDate ? `<div class="badge-line">日期：${esc(task.displayDate)}</div>` : ""}
+        ${module.id === "period" ? `<div class="badge-line">${esc(periodInfo(task))}</div>` : ""}
+        ${countLike ? `
+          <div class="counter-box">
+            <button data-action="count-minus" data-module="${module.id}" data-task="${task.id}" data-source-date="${sourceDate}">−1</button>
+            <strong>${task.count || 0}</strong>
+            <button data-action="count-plus" data-module="${module.id}" data-task="${task.id}" data-source-date="${sourceDate}">+1</button>
+          </div>` : ""}
+        <div class="task-actions">
+          <button class="primary complete-button" data-action="complete-task" data-module="${module.id}" data-task="${task.id}" data-source-date="${sourceDate}">${task.done ? "已完成" : "完成"}</button>
+          <button class="small" data-action="edit-task" data-module="${module.id}" data-task="${task.id}" data-source-date="${sourceDate}">编辑</button>
         </div>
       </article>`;
   }
@@ -829,22 +1010,14 @@
   }
 
   function renderCompare() {
-    const selected = state.modules.filter((module) => module.compare);
-    const sourceIds = new Set(selected.map((module) => module.id));
-    const query = route.query || "";
-    const rows = compareRows(activeHistory().filter((item) => sourceIds.has(item.moduleId)), query);
+    const rows = getTodayOverviewTasks();
     renderShell(`
       <section class="panel">
-        <h2>对比</h2>
-        <p class="hint">按事项名称和完成记录对比已经做过多少次。</p>
-        <div class="form-grid">
-          <label>事项搜索<input data-compare-query value="${esc(query)}" placeholder="例如 整理、阅读"></label>
-          <button data-action="compare-search">搜索</button>
-          <div class="compare-controls">${state.modules.map((module) => `<label class="checkbox-line"><input type="checkbox" data-action="toggle-compare" data-id="${module.id}" ${module.compare ? "checked" : ""}> ${esc(module.name)}</label>`).join("")}</div>
-        </div>
+        <h2>今日要做总览</h2>
+        <p class="hint">只显示本机日期 ${esc(todayRealKey())} 需要处理的事项。</p>
       </section>
-      <section class="compare-notes">
-        ${rows.length ? rows.map((row, index) => compareNote(row, index)).join("") : `<div class="panel empty">还没有可对比的完成记录。</div>`}
+      <section class="overview-notes compare-notes">
+        ${rows.length ? rows.map((row, index) => overviewTaskCard(row, index)).join("") : `<div class="panel empty">今天暂时没有要做的事。</div>`}
       </section>
     `);
   }
@@ -895,9 +1068,7 @@
           <label>首页副标题<input data-setting="subtitle" value="${esc(settings.subtitle)}"></label>
           <label>引言文字<input data-setting="quote" value="${esc(settings.quote)}"></label>
           <label>引言作者<input data-setting="quoteAuthor" value="${esc(settings.quoteAuthor)}"></label>
-          <label>电鼠名字<input data-setting="mouseName" value="${esc(settings.mouseName)}"></label>
           <label>自定义背景图片<input type="file" accept="image/*" data-action="background-file"></label>
-          <label>替换${esc(settings.mouseName)}图片<input type="file" accept="image/*" data-action="mouse-file"></label>
           <label>背景透明度 / 遮罩强度<input type="range" min="0" max="85" data-setting="overlay" value="${settings.overlay}"></label>
           <label>背景模糊<input type="range" min="0" max="18" data-setting="blur" value="${settings.blur}"></label>
           <label>背景显示方式<select data-setting="bgFit">${["cover","contain","repeat","center"].map((v) => `<option value="${v}" ${settings.bgFit === v ? "selected" : ""}>${v}</option>`).join("")}</select></label>
@@ -913,28 +1084,63 @@
         </div>
         <div class="row" style="margin-top:12px">
           <button data-action="reset-background">恢复默认背景</button>
-          <button data-action="reset-mouse-image">恢复默认${esc(settings.mouseName)}图片</button>
         </div>
       </section>
-      <section class="panel">
-        <h2>${esc(settings.mouseName)}语料</h2>
-        <div class="settings-grid">${Object.keys(SPEECH_LABELS).map(speechEditor).join("")}</div>
-      </section>
+      ${mouseSettingsSection()}
     `);
   }
 
-  function speechEditor(kind) {
+  function mouseSettingsSection() {
+    return `
+      <section class="panel">
+        <div class="row" style="justify-content:space-between">
+          <h2>电鼠</h2>
+          <button class="primary" data-action="add-mouse">增加电鼠</button>
+        </div>
+        <div class="mouse-settings-list">
+          ${(state.mice || []).map((mouse, index) => mouseSettingsCard(mouse, index)).join("")}
+        </div>
+      </section>`;
+  }
+
+  function mouseSettingsCard(mouse, index) {
+    return `
+      <article class="mouse-settings-card">
+        <div class="row" style="justify-content:space-between">
+          <strong data-mouse-title="${esc(mouse.id)}">${esc(mouse.name || `电鼠 ${index + 1}`)}</strong>
+          <label class="checkbox-line"><input type="checkbox" data-mouse-visible="${esc(mouse.id)}" ${mouse.visible !== false ? "checked" : ""}> 显示</label>
+        </div>
+        <div class="settings-grid">
+          <label>名字<input data-mouse-setting="name" data-mouse-id="${esc(mouse.id)}" value="${esc(mouse.name || `电鼠 ${index + 1}`)}"></label>
+          <label>聊天框位置<select data-mouse-setting="speechBubbleSide" data-mouse-id="${esc(mouse.id)}">
+            <option value="right" ${mouse.speechBubbleSide !== "left" ? "selected" : ""}>右侧</option>
+            <option value="left" ${mouse.speechBubbleSide === "left" ? "selected" : ""}>左侧</option>
+          </select></label>
+          <label>替换图片<input type="file" accept="image/*" data-action="mouse-file" data-mouse-id="${esc(mouse.id)}"></label>
+        </div>
+        <div class="row">
+          <button class="small" data-action="reset-mouse-image" data-id="${esc(mouse.id)}">恢复默认图片</button>
+          <button class="small danger" data-action="delete-mouse" data-id="${esc(mouse.id)}" ${state.mice.length <= 1 ? "disabled" : ""}>删除这只电鼠</button>
+        </div>
+        <details class="speech-fold">
+          <summary data-speech-summary="${esc(mouse.id)}">${esc(mouse.name || `电鼠 ${index + 1}`)} 语料区</summary>
+          <div class="settings-grid">${Object.keys(SPEECH_LABELS).map((kind) => speechEditor(mouse, kind)).join("")}</div>
+        </details>
+      </article>`;
+  }
+
+  function speechEditor(mouse, kind) {
     return `
       <div class="speech-editor">
         <strong>${SPEECH_LABELS[kind]}</strong>
-        ${(speech[kind] || []).map((line, index) => `
+        ${((mouse.speech || {})[kind] || []).map((line, index) => `
           <div class="row">
-            <input data-speech="${kind}" data-index="${index}" value="${esc(line)}">
-            <button class="small danger" data-action="delete-speech" data-kind="${kind}" data-index="${index}">删</button>
+            <input data-mouse-speech="${kind}" data-mouse-id="${esc(mouse.id)}" data-index="${index}" value="${esc(line)}">
+            <button class="small danger" data-action="delete-speech" data-id="${esc(mouse.id)}" data-kind="${kind}" data-index="${index}">删</button>
           </div>`).join("")}
         <div class="row">
-          <input placeholder="添加一句" data-new-speech="${kind}">
-          <button class="small" data-action="add-speech" data-kind="${kind}">添加</button>
+          <input placeholder="添加一句" data-new-speech="${kind}" data-mouse-id="${esc(mouse.id)}">
+          <button class="small" data-action="add-speech" data-id="${esc(mouse.id)}" data-kind="${kind}">添加</button>
         </div>
       </div>`;
   }
@@ -972,10 +1178,23 @@
     return { x: Math.max(0, Math.min(pos.x, Math.max(0, board.clientWidth - target.offsetWidth - 8))), y: Math.max(0, Math.min(pos.y, Math.max(0, board.clientHeight - target.offsetHeight - 8))) };
   }
 
-  function speak(kind) {
-    const pool = [...(speech[kind] || []), ...(kind === "complete" ? speech.encourage || [] : [])].filter(Boolean);
+  function findMouse(mouseId) {
+    return (state.mice || []).find((mouse) => mouse.id === mouseId);
+  }
+
+  function speakerMouse(mouseId = "") {
+    const visible = (state.mice || []).filter((mouse) => mouse.visible !== false);
+    return findMouse(mouseId) || findMouse(lastMouseId) || visible[Math.floor(Math.random() * visible.length)] || state.mice?.[0];
+  }
+
+  function speak(kind, mouseId = "") {
+    const mouse = speakerMouse(mouseId);
+    if (!mouse) return;
+    lastMouseId = mouse.id;
+    const mouseSpeech = normalizeSpeechSet(mouse.speech);
+    const pool = [...(mouseSpeech[kind] || []), ...(kind === "complete" ? mouseSpeech.encourage || [] : [])].filter(Boolean);
     const text = pool.length ? pool[Math.floor(Math.random() * pool.length)] : "吱。";
-    const bubble = document.querySelector("[data-mouse-bubble]");
+    const bubble = document.querySelector(`[data-mouse-bubble="${cssEscape(mouse.id)}"]`);
     if (bubble) bubble.textContent = text;
     showToast(text);
   }
@@ -1036,9 +1255,20 @@
     if (action !== "open-module") event.stopPropagation();
     if (action === "home") return goHome();
     if (action === "settings") { route = { view: "settings" }; return render(); }
-    if (action === "compare") { route = { view: "compare", query: "" }; return render(); }
+    if (action === "compare") {
+      if (route.view === "module" && route.id === "today") {
+        route.todayPanel = true;
+        route.todayPanelTab = route.todayPanelTab || "period";
+        return render();
+      }
+      route = { view: "compare" };
+      return render();
+    }
     if (action === "compare-search") { route.query = document.querySelector("[data-compare-query]")?.value || ""; return renderCompare(); }
-    if (action === "mouse") return speak("click");
+    if (action === "today-overview-toggle") { route.todayPanel = true; route.todayPanelTab = route.todayPanelTab || "period"; return render(); }
+    if (action === "today-overview-close") { route.todayPanel = false; return render(); }
+    if (action === "today-overview-tab") { route.todayPanel = true; route.todayPanelTab = el.dataset.tab || "period"; return render(); }
+    if (action === "mouse") return speak("click", el.dataset.id);
     if (action === "open-module") { route = { view: "module", id: el.dataset.id }; return render(); }
     if (action === "stats") { route = { view: "stats", id: el.dataset.id }; return render(); }
     if (action === "maybe") { route = { view: "maybe", id: el.dataset.id }; return render(); }
@@ -1059,14 +1289,30 @@
     if (action === "maybe-add") return addMaybeToModule(el.dataset.module, el.dataset.id, el.dataset.target);
     if (action === "save-settings") return saveSettingsFromDom();
     if (action === "reset-background") { background = null; persist(); render(); showToast("背景已恢复默认"); }
-    if (action === "reset-mouse-image") { customMouseImage = null; persist(); render(); showToast("已恢复默认图片"); }
-    if (action === "delete-speech") { speech[el.dataset.kind].splice(Number(el.dataset.index), 1); persist(); render(); }
-    if (action === "add-speech") return addSpeechLine(el.dataset.kind);
+    if (action === "add-mouse") return addMouse();
+    if (action === "reset-mouse-image") { const mouse = findMouse(el.dataset.id); if (mouse) mouse.image = ""; persist(); render(); showToast("已恢复默认图片"); }
+    if (action === "delete-mouse") return deleteMouse(el.dataset.id);
+    if (action === "delete-speech") { const mouse = findMouse(el.dataset.id); if (mouse?.speech?.[el.dataset.kind]) mouse.speech[el.dataset.kind].splice(Number(el.dataset.index), 1); persist(); render(); }
+    if (action === "add-speech") return addSpeechLine(el.dataset.id, el.dataset.kind);
   }, true);
 
   document.addEventListener("change", (event) => {
     if (event.target.matches("[data-action='background-file']")) return saveImageFile(event.target.files[0], "background");
-    if (event.target.matches("[data-action='mouse-file']")) return saveImageFile(event.target.files[0], "mouse");
+    if (event.target.matches("[data-action='mouse-file']")) return saveImageFile(event.target.files[0], "mouse", event.target.dataset.mouseId);
+    if (event.target.matches("[data-mouse-visible]")) {
+      const mouse = findMouse(event.target.dataset.mouseVisible);
+      if (mouse) mouse.visible = event.target.checked;
+      persist();
+      render();
+      return;
+    }
+    if (event.target.matches("[data-mouse-setting='speechBubbleSide']")) {
+      const mouse = findMouse(event.target.dataset.mouseId);
+      if (mouse) mouse.speechBubbleSide = event.target.value === "left" ? "left" : "right";
+      persist();
+      render();
+      return;
+    }
     if (event.target.matches("[data-action='toggle-compare']")) {
       const module = getModule(event.target.dataset.id);
       module.compare = event.target.checked;
@@ -1082,6 +1328,16 @@
       route.query = event.target.value;
       renderCompare();
     }
+  });
+
+  document.addEventListener("input", (event) => {
+    if (!event.target.matches("[data-mouse-setting='name']")) return;
+    const mouse = findMouse(event.target.dataset.mouseId);
+    if (!mouse) return;
+    mouse.name = event.target.value.trim() || defaultMouseName(mouse);
+    document.querySelector(`[data-mouse-title="${cssEscape(mouse.id)}"]`)?.replaceChildren(document.createTextNode(mouse.name));
+    document.querySelector(`[data-speech-summary="${cssEscape(mouse.id)}"]`)?.replaceChildren(document.createTextNode(`${mouse.name} 语料区`));
+    persist();
   });
 
   document.addEventListener("submit", (event) => {
@@ -1122,6 +1378,7 @@
     const pos = drag.kind === "mouse" ? clampViewportPosition(raw, drag.target.offsetWidth, drag.target.offsetHeight) : clampBoardPosition(raw, drag.target);
     drag.target.style.left = `${pos.x}px`;
     drag.target.style.top = `${pos.y}px`;
+    if (drag.kind === "mouse") applyBubbleSide(drag.target, findMouse(drag.id), pos);
     event.preventDefault();
   }, { passive: false });
 
@@ -1129,7 +1386,12 @@
     if (!drag) return;
     const pos = { x: drag.target.offsetLeft, y: drag.target.offsetTop };
     drag.target.classList.remove("dragging");
-    if (drag.kind === "mouse") state.mousePos = pos;
+    if (drag.kind === "mouse") {
+      const mouse = findMouse(drag.id);
+      if (mouse) mouse.position = pos;
+      applyBubbleSide(drag.target, mouse, pos);
+      state.mousePos = state.mice?.[0]?.position || pos;
+    }
     if (drag.kind === "module") {
       const module = getModule(drag.id);
       if (module) module.position = pos;
@@ -1398,30 +1660,73 @@
     document.querySelectorAll("[data-setting]").forEach((input) => {
       settings[input.dataset.setting] = input.type === "range" ? Number(input.value) : input.value;
     });
-    document.querySelectorAll("[data-speech]").forEach((input) => {
-      speech[input.dataset.speech][Number(input.dataset.index)] = input.value;
+    document.querySelectorAll("[data-mouse-setting]").forEach((input) => {
+      const mouse = findMouse(input.dataset.mouseId);
+      if (!mouse) return;
+      if (input.dataset.mouseSetting === "name") mouse.name = input.value.trim() || defaultMouseName(mouse);
+      if (input.dataset.mouseSetting === "speechBubbleSide") mouse.speechBubbleSide = input.value === "left" ? "left" : "right";
+    });
+    document.querySelectorAll("[data-mouse-speech]").forEach((input) => {
+      const mouse = findMouse(input.dataset.mouseId);
+      if (!mouse) return;
+      mouse.speech = normalizeSpeechSet(mouse.speech);
+      mouse.speech[input.dataset.mouseSpeech][Number(input.dataset.index)] = input.value;
     });
     persist();
     render();
     showToast("设置已保存");
   }
 
-  function addSpeechLine(kind) {
-    const input = document.querySelector(`[data-new-speech="${kind}"]`);
+  function defaultMouseName(mouse) {
+    const index = Math.max(0, (state.mice || []).findIndex((item) => item.id === mouse.id));
+    return `电鼠 ${index + 1}`;
+  }
+
+  function addSpeechLine(mouseId, kind) {
+    const input = document.querySelector(`[data-new-speech="${kind}"][data-mouse-id="${mouseId}"]`);
     const value = input?.value.trim();
     if (!value) return;
-    speech[kind] = speech[kind] || [];
-    speech[kind].push(value);
+    const mouse = findMouse(mouseId);
+    if (!mouse) return;
+    mouse.speech = normalizeSpeechSet(mouse.speech);
+    mouse.speech[kind] = mouse.speech[kind] || [];
+    mouse.speech[kind].push(value);
     persist();
     render();
   }
 
-  function saveImageFile(file, target) {
+  function addMouse() {
+    const index = state.mice.length;
+    state.mice.push(defaultMouse(index, {
+      name: `电鼠 ${index + 1}`,
+      position: defaultMousePosition(index),
+      speech: DEFAULT_SPEECH
+    }));
+    persist();
+    render();
+    speak("click", state.mice[index].id);
+  }
+
+  function deleteMouse(mouseId) {
+    if ((state.mice || []).length <= 1) return showToast("至少保留一只电鼠");
+    const mouse = findMouse(mouseId);
+    if (!mouse) return;
+    if (!confirm(`删除「${mouse.name || "电鼠"}」？`)) return;
+    state.mice = state.mice.filter((item) => item.id !== mouseId);
+    if (lastMouseId === mouseId) lastMouseId = state.mice[0]?.id || "";
+    persist();
+    render();
+  }
+
+  function saveImageFile(file, target, mouseId = "") {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
       if (target === "background") background = { name: file.name, dataUrl: reader.result };
-      if (target === "mouse") customMouseImage = { name: file.name, dataUrl: reader.result };
+      if (target === "mouse") {
+        const mouse = findMouse(mouseId) || state.mice?.[0];
+        if (mouse) mouse.image = reader.result;
+      }
       persist();
       render();
       showToast(target === "mouse" ? "图片已保存到本地" : "背景已保存到本地");
