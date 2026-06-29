@@ -442,6 +442,15 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
   font-weight: 800;
 }
 
+.backup-panel summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.backup-panel input[type="file"] {
+  max-width: 100%;
+}
+
 .stats-layout {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

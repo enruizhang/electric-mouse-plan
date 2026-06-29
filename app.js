@@ -7,8 +7,12 @@
     settings: "electric_mouse_plan_v1_settings",
     speech: "electric_mouse_plan_v1_speech",
     background: "electric_mouse_plan_v1_background",
-    mouseImage: "electric_mouse_plan_v1_mouse_image"
+    mouseImage: "electric_mouse_plan_v1_mouse_image",
+    beforeImportBackup: "electric_mouse_plan_v1_before_import_backup"
   };
+  const PROJECT_PREFIX = "electric_mouse_plan_v1_";
+  const BACKUP_APP_NAME = "electric-mouse-plan";
+  const BACKUP_VERSION = 1;
 
   const PERIODS = [
     ["daily", "每日"],
@@ -1086,8 +1090,26 @@
           <button data-action="reset-background">恢复默认背景</button>
         </div>
       </section>
+      ${backupSettingsSection()}
       ${mouseSettingsSection()}
     `);
+  }
+
+  function backupSettingsSection() {
+    const beforeBackup = !!localStorage.getItem(KEYS.beforeImportBackup);
+    return `
+      <details class="panel backup-panel">
+        <summary>备份与恢复</summary>
+        <p class="hint">导出会保存当前网站里的模块、任务、完成历史、设置、电鼠、语料、背景等本地数据。导入备份会覆盖当前数据，请先确认备份文件来源可靠。</p>
+        <div class="settings-grid">
+          <button class="primary" data-action="export-backup">导出备份</button>
+          <label>导入备份（覆盖当前数据）<input type="file" accept="application/json,.json" data-action="import-backup-file"></label>
+        </div>
+        <p class="history-note">导入前会自动保存一份当前数据，可用下面的按钮恢复。不会导出或导入旧购物清单网站数据。</p>
+        <div class="row" style="margin-top:10px">
+          <button class="danger" data-action="restore-before-import" ${beforeBackup ? "" : "disabled"}>恢复导入前数据</button>
+        </div>
+      </details>`;
   }
 
   function mouseSettingsSection() {
@@ -1288,6 +1310,8 @@
     if (action === "edit-maybe") return editMaybe(el.dataset.module, el.dataset.id);
     if (action === "maybe-add") return addMaybeToModule(el.dataset.module, el.dataset.id, el.dataset.target);
     if (action === "save-settings") return saveSettingsFromDom();
+    if (action === "export-backup") return exportBackup();
+    if (action === "restore-before-import") return restoreBeforeImportBackup();
     if (action === "reset-background") { background = null; persist(); render(); showToast("背景已恢复默认"); }
     if (action === "add-mouse") return addMouse();
     if (action === "reset-mouse-image") { const mouse = findMouse(el.dataset.id); if (mouse) mouse.image = ""; persist(); render(); showToast("已恢复默认图片"); }
@@ -1298,6 +1322,7 @@
 
   document.addEventListener("change", (event) => {
     if (event.target.matches("[data-action='background-file']")) return saveImageFile(event.target.files[0], "background");
+    if (event.target.matches("[data-action='import-backup-file']")) return importBackupFile(event.target.files[0], event.target);
     if (event.target.matches("[data-action='mouse-file']")) return saveImageFile(event.target.files[0], "mouse", event.target.dataset.mouseId);
     if (event.target.matches("[data-mouse-visible]")) {
       const mouse = findMouse(event.target.dataset.mouseVisible);
@@ -1693,6 +1718,156 @@
     mouse.speech[kind].push(value);
     persist();
     render();
+  }
+
+  function projectStorageSnapshot(includeSafetyBackup = false) {
+    const data = {};
+    storageKeys().forEach((key) => {
+      if (!key.startsWith(PROJECT_PREFIX)) return;
+      if (!includeSafetyBackup && key === KEYS.beforeImportBackup) return;
+      data[key] = localStorage.getItem(key);
+    });
+    return data;
+  }
+
+  function storageKeys() {
+    return Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index)).filter(Boolean);
+  }
+
+  function createBackupPayload(kind = "manual") {
+    persist();
+    const localStorageData = projectStorageSnapshot(false);
+    return {
+      appName: BACKUP_APP_NAME,
+      backupVersion: BACKUP_VERSION,
+      kind,
+      exportedAt: nowIso(),
+      localDate: dateKey(new Date()),
+      localStoragePrefix: PROJECT_PREFIX,
+      exportedKeys: Object.keys(localStorageData),
+      localStorageData,
+      parsed: {
+        state,
+        history,
+        settings,
+        speech,
+        background,
+        mouseImage: customMouseImage
+      }
+    };
+  }
+
+  function backupFileName() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `electric-mouse-plan-backup-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}-${pad(d.getMinutes())}.json`;
+  }
+
+  function exportBackup() {
+    try {
+      const payload = createBackupPayload("manual");
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = backupFileName();
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast("备份已导出。");
+    } catch {
+      showToast("导出失败，请检查浏览器存储。");
+    }
+  }
+
+  function validateBackupPayload(payload) {
+    if (!payload || typeof payload !== "object") return "备份文件格式不正确。";
+    if (payload.appName !== BACKUP_APP_NAME) return "这不是电鼠计划的备份文件。";
+    if (payload.backupVersion !== BACKUP_VERSION) return "备份版本不兼容。";
+    if (!payload.localStorageData || typeof payload.localStorageData !== "object") return "备份文件缺少本地数据。";
+    if (!payload.localStorageData[KEYS.state]) return "备份文件缺少模块和任务数据。";
+    const keys = Object.keys(payload.localStorageData);
+    if (!keys.length) return "备份文件内容为空。";
+    if (keys.some((key) => !key.startsWith(PROJECT_PREFIX))) return "备份文件包含非电鼠计划数据，已停止导入。";
+    return "";
+  }
+
+  function clearProjectStorage(keepSafetyBackup = true) {
+    storageKeys().forEach((key) => {
+      if (!key.startsWith(PROJECT_PREFIX)) return;
+      if (keepSafetyBackup && key === KEYS.beforeImportBackup) return;
+      localStorage.removeItem(key);
+    });
+  }
+
+  function writeBackupToLocalStorage(payload) {
+    clearProjectStorage(true);
+    Object.entries(payload.localStorageData).forEach(([key, value]) => {
+      if (!key.startsWith(PROJECT_PREFIX) || key === KEYS.beforeImportBackup) return;
+      localStorage.setItem(key, String(value ?? ""));
+    });
+  }
+
+  function saveBeforeImportBackup() {
+    const payload = createBackupPayload("before-import");
+    localStorage.setItem(KEYS.beforeImportBackup, JSON.stringify(payload));
+  }
+
+  function importBackupFile(file, input) {
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".json")) {
+      input.value = "";
+      return showToast("请选择 JSON 备份文件。");
+    }
+    const reader = new FileReader();
+    reader.onerror = () => {
+      input.value = "";
+      showToast("导入失败，请检查文件。");
+    };
+    reader.onload = () => {
+      input.value = "";
+      let payload;
+      try {
+        payload = JSON.parse(String(reader.result || ""));
+      } catch {
+        return showToast("JSON 解析失败，备份文件格式不正确。");
+      }
+      const error = validateBackupPayload(payload);
+      if (error) return showToast(error);
+      if (!confirm("导入备份会覆盖当前数据。建议先导出当前备份。确定继续吗？")) return;
+      try {
+        saveBeforeImportBackup();
+        writeBackupToLocalStorage(payload);
+        showToast("导入成功，页面即将刷新。");
+        setTimeout(() => location.reload(), 500);
+      } catch {
+        showToast("浏览器存储空间不足，导入失败。");
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function restoreBeforeImportBackup() {
+    const raw = localStorage.getItem(KEYS.beforeImportBackup);
+    if (!raw) return showToast("没有可恢复的导入前数据。");
+    let payload;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return showToast("导入前备份已损坏，无法恢复。");
+    }
+    const error = validateBackupPayload(payload);
+    if (error) return showToast(error);
+    if (!confirm("恢复导入前数据会覆盖当前电鼠计划数据。确定继续吗？")) return;
+    try {
+      writeBackupToLocalStorage(payload);
+      localStorage.setItem(KEYS.beforeImportBackup, raw);
+      showToast("已恢复导入前数据，页面即将刷新。");
+      setTimeout(() => location.reload(), 500);
+    } catch {
+      showToast("恢复失败，请检查浏览器存储空间。");
+    }
   }
 
   function addMouse() {
