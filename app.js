@@ -482,7 +482,7 @@
     ready.forEach((task) => {
       task.type = "once";
       task.done = false;
-      task.position = defaultTaskPosition(today.tasks.length);
+      task.position = nextNotePosition(today.tasks, "task");
       today.tasks.push(task);
     });
   }
@@ -620,7 +620,7 @@
           <button class="primary" data-action="add-module">新增模块</button>
         </div>
       </section>
-      <main class="note-board module-board" data-board="modules">
+      <main class="note-board module-board" data-board="modules" ${boardSizeStyle(state.modules, "module")}>
         ${state.modules.map((module, index) => moduleCard(module, index)).join("")}
       </main>
     `, { showIntro: true });
@@ -743,13 +743,36 @@
   }
 
   function taskBoardSizeStyle(tasks = []) {
-    if (!tasks.length) return "";
-    const cardHeight = isCompactViewport() ? 142 : 214;
-    const maxY = tasks.reduce((max, task, index) => {
-      const pos = task.position || defaultTaskPosition(index);
+    return boardSizeStyle(tasks, "task");
+  }
+
+  function boardSizeStyle(items = [], kind = "task") {
+    if (!items.length) return "";
+    const base = kind === "module" ? (isCompactViewport() ? 360 : 610) : (isCompactViewport() ? 410 : 540);
+    const cardHeight = kind === "module" ? (isCompactViewport() ? 122 : 190) : (isCompactViewport() ? 142 : 214);
+    const maxY = items.reduce((max, item, index) => {
+      const fallback = kind === "module" ? defaultModulePosition(index) : defaultTaskPosition(index);
+      const pos = item.position || fallback;
       return Math.max(max, Number(pos.y) || 0);
     }, 0);
-    return `style="min-height:${Math.max(isCompactViewport() ? 410 : 540, maxY + cardHeight)}px"`;
+    return `style="min-height:${Math.max(base, maxY + cardHeight)}px"`;
+  }
+
+  function nextNotePosition(items = [], kind = "task") {
+    if (!items.length) return kind === "module" ? defaultModulePosition(0) : defaultTaskPosition(0);
+    const compact = isCompactViewport();
+    const columns = kind === "module" ? (compact ? 2 : 3) : (compact ? 2 : 3);
+    const stepX = kind === "module" ? (compact ? 132 : 255) : (compact ? 132 : 250);
+    const stepY = kind === "module" ? (compact ? 122 : 190) : (compact ? 136 : 198);
+    const baseX = kind === "module" ? (compact ? 8 : 18) : (compact ? 8 : 14);
+    const baseY = kind === "module" ? (compact ? 10 : 18) : (compact ? 10 : 14);
+    const maxBottom = items.reduce((max, item, index) => {
+      const fallback = kind === "module" ? defaultModulePosition(index) : defaultTaskPosition(index);
+      const pos = item.position || fallback;
+      return Math.max(max, (Number(pos.y) || 0) + stepY);
+    }, baseY);
+    const col = items.length % columns;
+    return { x: baseX + col * stepX, y: maxBottom + 10 };
   }
 
   function taskCard(module, task, index, sourceDate = "") {
@@ -862,7 +885,7 @@
           <button class="primary" type="submit">添加备用便签</button>
         </form>
       </details>
-      <section class="note-board task-board maybe-board">
+      <section class="note-board task-board maybe-board" ${boardSizeStyle(module.maybe, "task")}>
         ${module.maybe.length ? module.maybe.map((item, index) => maybeCard(module, item, index)).join("") : `<div class="panel empty">备用池还是空的。</div>`}
       </section>
     `);
@@ -1203,7 +1226,9 @@
 
   function clampBoardPosition(pos, target) {
     const board = target.parentElement;
-    return { x: Math.max(0, Math.min(pos.x, Math.max(0, board.clientWidth - target.offsetWidth - 8))), y: Math.max(0, Math.min(pos.y, Math.max(0, board.clientHeight - target.offsetHeight - 8))) };
+    const wantedHeight = Math.max(board.clientHeight, pos.y + target.offsetHeight + 160);
+    if (wantedHeight > board.clientHeight) board.style.minHeight = `${wantedHeight}px`;
+    return { x: Math.max(0, Math.min(pos.x, Math.max(0, board.clientWidth - target.offsetWidth - 8))), y: Math.max(0, pos.y) };
   }
 
   function findMouse(mouseId) {
@@ -1457,7 +1482,7 @@
         const data = namedValues(modal);
         if (!data.name.trim()) return;
         if (id) Object.assign(module, { name: data.name.trim(), color: data.color, textColor: data.textColor, alpha: Number(data.alpha) / 100 });
-        else state.modules.push({ id: uid(), name: data.name.trim(), locked: false, color: data.color, textColor: data.textColor, alpha: Number(data.alpha) / 100, tasks: [], maybe: [], compare: false, position: defaultModulePosition(state.modules.length) });
+        else state.modules.push({ id: uid(), name: data.name.trim(), locked: false, color: data.color, textColor: data.textColor, alpha: Number(data.alpha) / 100, tasks: [], maybe: [], compare: false, position: nextNotePosition(state.modules, "module") });
         persist();
         render();
         speak("add");
@@ -1484,13 +1509,13 @@
       if (!data.dueDate) return showToast("非今日事项需要选择日期");
       const task = makeTask(data, module.id);
       task.type = "non_today";
-      task.position = defaultTaskPosition(state.futureTasks.length);
+      task.position = nextNotePosition(state.futureTasks, "task");
       state.futureTasks.push(task);
       addedTask = task;
     } else {
       const task = makeTask(data, module.id);
       if (module.id === "today") task.period = "";
-      task.position = defaultTaskPosition(module.tasks.length);
+      task.position = nextNotePosition(module.tasks, "task");
       module.tasks.push(task);
       addedTask = task;
     }
@@ -1628,7 +1653,7 @@
   function submitMaybe(form) {
     const module = getModule(form.dataset.module);
     const data = Object.fromEntries(new FormData(form).entries());
-    module.maybe.push({ id: uid(), title: data.title.trim(), note: data.note || "", color: data.color, textColor: data.textColor, alpha: Number(data.alpha || 92) / 100, position: defaultTaskPosition(module.maybe.length) });
+    module.maybe.push({ id: uid(), title: data.title.trim(), note: data.note || "", color: data.color, textColor: data.textColor, alpha: Number(data.alpha || 92) / 100, position: nextNotePosition(module.maybe, "task") });
     persist();
     render();
     speak("add");
@@ -1666,7 +1691,7 @@
     if (!item || !target) return;
     const remove = confirm("点“确定”加入并移除原备用便签，点“取消”加入但保留原便签。");
     const task = makeTask({ title: item.title, note: item.note, type: targetId === "period" ? "periodic" : "once", color: item.color, textColor: item.textColor, alpha: Math.round((item.alpha ?? .92) * 100) }, targetId);
-    task.position = defaultTaskPosition(target.tasks.length);
+    task.position = nextNotePosition(target.tasks, "task");
     target.tasks.push(task);
     if (remove) source.maybe = source.maybe.filter((entry) => entry.id !== itemId);
     persist();
