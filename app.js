@@ -592,7 +592,6 @@
         </div>` : `<div></div>`}
         <nav class="toolbar">
           <button class="ghost" data-action="home">首页</button>
-          <button class="ghost" data-action="compare">对比</button>
           <button class="ghost" data-action="settings">设置</button>
         </nav>
       </header>
@@ -609,7 +608,6 @@
     if (route.view === "stats") return renderStats(route.id);
     if (route.view === "maybe") return renderMaybe(route.id);
     if (route.view === "day") return renderDay(route.id || "today", route.date || todayRealKey());
-    if (route.view === "compare") return renderCompare();
     if (route.view === "settings") return renderSettings();
     return renderHome();
   }
@@ -660,10 +658,9 @@
             <p class="hint">${isToday ? "今日任务每天 12:00 归档清空；非今日事项会在到期后自动出现。" : isPeriod ? "这里的每一张便签默认都是周期任务。" : "添加、完成、计数或整理这个模块里的行动。"}</p>
           </div>
           <div class="row">
-            ${isToday ? `<button data-action="today-overview-toggle">今日总览</button>` : ""}
             ${(isToday || isPeriod) ? `<button data-action="maybe" data-id="${module.id}">也许自己可以做的事</button>` : ""}
-            ${hasCalendar ? `<button data-action="day" data-module="${module.id}" data-date="${todayRealKey()}">日期记录</button>` : ""}
             <button data-action="stats" data-id="${module.id}">看已做统计</button>
+            ${hasCalendar ? `<button data-action="day" data-module="${module.id}" data-date="${todayRealKey()}">日期便签</button>` : ""}
           </div>
         </div>
       </section>
@@ -672,7 +669,6 @@
         ${taskForm(module.id)}
       </details>
       ${isPeriod ? renderTaskBoard(module, sortByTime(visiblePeriodTasks(module.tasks))) : renderTaskBoard(module, sortByTime(module.tasks))}
-      ${hasCalendar ? renderCalendar(module.id) : ""}
     `;
     const page = isToday && route.todayPanel
       ? `<div class="today-overview-layout"><div class="today-main">${content}</div>${renderTodayExtension(route.todayPanelTab || "period")}</div>`
@@ -741,9 +737,19 @@
 
   function renderTaskBoard(module, tasks = module.tasks, sourceDate = "") {
     return `
-      <section class="note-board task-board" data-board="tasks" data-module="${module.id}">
+      <section class="note-board task-board" data-board="tasks" data-module="${module.id}" ${taskBoardSizeStyle(tasks)}>
         ${tasks.length ? tasks.map((task, index) => taskCard(module, task, index, sourceDate)).join("") : `<div class="panel empty">这里还没有便签。</div>`}
       </section>`;
+  }
+
+  function taskBoardSizeStyle(tasks = []) {
+    if (!tasks.length) return "";
+    const cardHeight = isCompactViewport() ? 142 : 214;
+    const maxY = tasks.reduce((max, task, index) => {
+      const pos = task.position || defaultTaskPosition(index);
+      return Math.max(max, Number(pos.y) || 0);
+    }, 0);
+    return `style="min-height:${Math.max(isCompactViewport() ? 410 : 540, maxY + cardHeight)}px"`;
   }
 
   function taskCard(module, task, index, sourceDate = "") {
@@ -1277,19 +1283,6 @@
     if (action !== "open-module") event.stopPropagation();
     if (action === "home") return goHome();
     if (action === "settings") { route = { view: "settings" }; return render(); }
-    if (action === "compare") {
-      if (route.view === "module" && route.id === "today") {
-        route.todayPanel = true;
-        route.todayPanelTab = route.todayPanelTab || "period";
-        return render();
-      }
-      route = { view: "compare" };
-      return render();
-    }
-    if (action === "compare-search") { route.query = document.querySelector("[data-compare-query]")?.value || ""; return renderCompare(); }
-    if (action === "today-overview-toggle") { route.todayPanel = true; route.todayPanelTab = route.todayPanelTab || "period"; return render(); }
-    if (action === "today-overview-close") { route.todayPanel = false; return render(); }
-    if (action === "today-overview-tab") { route.todayPanel = true; route.todayPanelTab = el.dataset.tab || "period"; return render(); }
     if (action === "mouse") return speak("click", el.dataset.id);
     if (action === "open-module") { route = { view: "module", id: el.dataset.id }; return render(); }
     if (action === "stats") { route = { view: "stats", id: el.dataset.id }; return render(); }
@@ -1338,20 +1331,10 @@
       render();
       return;
     }
-    if (event.target.matches("[data-action='toggle-compare']")) {
-      const module = getModule(event.target.dataset.id);
-      module.compare = event.target.checked;
-      persist();
-      render();
-    }
     if (event.target.matches("[data-role='type-select']")) {
       const form = event.target.closest("form");
       const field = form?.querySelector(".future-date-field");
       if (field) field.classList.toggle("hidden", event.target.value !== "non_today");
-    }
-    if (event.target.matches("[data-compare-query]")) {
-      route.query = event.target.value;
-      renderCompare();
     }
   });
 
@@ -1496,21 +1479,31 @@
     if (!module) return;
     const data = Object.fromEntries(new FormData(form).entries());
     data.isCount = form.querySelector("[name='isCount']")?.checked || false;
+    let addedTask = null;
     if (module.id === "today" && data.type === "non_today") {
       if (!data.dueDate) return showToast("非今日事项需要选择日期");
       const task = makeTask(data, module.id);
       task.type = "non_today";
       task.position = defaultTaskPosition(state.futureTasks.length);
       state.futureTasks.push(task);
+      addedTask = task;
     } else {
       const task = makeTask(data, module.id);
       if (module.id === "today") task.period = "";
       task.position = defaultTaskPosition(module.tasks.length);
       module.tasks.push(task);
+      addedTask = task;
     }
     persist();
     render();
+    if (addedTask) scrollToTask(addedTask.id);
     speak("add");
+  }
+
+  function scrollToTask(taskId) {
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-task-id="${cssEscape(taskId)}"]`)?.scrollIntoView({ block: "nearest", inline: "end", behavior: "smooth" });
+    });
   }
 
   function toggleTaskDone(moduleId, taskId, sourceDate = "", options = {}) {

@@ -1,9 +1,9 @@
-const CACHE_NAME = "electric-mouse-plan-pwa-v1.5.2";
+const CACHE_NAME = "electric-mouse-plan-pwa-v1.5.3";
 const CORE_ASSETS = [
   "./",
   "./index.html",
-  "./style.css?v=1.5.2",
-  "./app.js?v=1.5.2",
+  "./style.css?v=1.5.3",
+  "./app.js?v=1.5.3",
   "./manifest.webmanifest",
   "./electric-mouse.png",
   "./icon-192.png",
